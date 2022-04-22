@@ -11,21 +11,31 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <assert.h>
-#include <seq.h> /* Hanson's sequence library */
-#include <uarray.h>
+//#include <seq.h> /* Hanson's sequence library */
+//#include <uarray.h>
 
 #include "um_segments.h"
 #define T Memory_T
 
 /* macros ================================================================== */
-#define SEQ_SEGMENT 1000
-#define SEQ_UNMAPPED 500
+//#define SEQ_SEGMENT 1000
+//#define SEQ_UNMAPPED 500
 
 /* struct definition ======================================================= */
 struct T {
-    Seq_T segments;
-    Seq_T unmapped_segments; /* sequence holding unmapped ids */
+    struct array **segments;
+    uint32_t *unmapped_segments; /* sequence holding unmapped ids */
+    int num_mapped;
+    int num_unmapped;
 };
+
+struct array {
+    uint32_t *words;
+    int length; 
+};
+
+struct array *copy(struct array *segment);
+void free_words(struct array *segment);
 
 /* function definitions =====================================================*/
 
@@ -44,15 +54,18 @@ extern T segment_new()
 {
     /* allocate space for memory equal to the size of the struct */
     T memory = malloc(sizeof(struct T));
-    assert(memory != NULL);
+    //assert(memory != NULL);
 
     /* create sequence of segments and check memory correctly allocated */
-    memory->segments = Seq_new(SEQ_SEGMENT);
-    assert(memory->segments != NULL);
+    memory->segments = calloc(100000000, sizeof(struct array));
+    //assert(memory->segments != NULL);
 
     /* create sequence of unmapped segments */
-    memory->unmapped_segments = Seq_new(SEQ_UNMAPPED);
-    assert(memory->unmapped_segments != NULL);
+    memory->unmapped_segments = calloc(100000000, sizeof(uint32_t));
+    //assert(memory->unmapped_segments != NULL);
+    
+    memory->num_mapped = 0;
+    memory->num_unmapped = 0;
 
     return memory; /* return created memory */
 }
@@ -69,29 +82,27 @@ extern T segment_new()
 */
 extern void segment_free(T memory)
 {
-    assert(memory != NULL);
-    UArray_T segment_array;
+    //assert(memory != NULL);
+    struct array *segment_array;
+    //fprintf(stderr, "num mapped to free: %d\n", memory->num_mapped);
 
     /* frees all individual segment arrays */
-    for (int i = 0; i < Seq_length(memory->segments); i++) {
-        segment_array = Seq_get(memory->segments, i);
-
+    for (int i = 0; i < memory->num_mapped; i++) {
+        segment_array = memory->segments[i];
+        
         if (segment_array != NULL) {
-            UArray_free(&segment_array);
+            //fprintf(stderr, "not NULL\n");
+            
+            free(segment_array->words);
+            free(segment_array);
         }
     }
 
-    /* frees all contents of unmapped segments sequence */
-    for (int i = 0; i < Seq_length(memory->unmapped_segments); i++) {
-        free(Seq_get(memory->unmapped_segments, i));
-    }
-
     /* frees sequences and structs themselves */
-    Seq_free(&(memory->segments));
-    Seq_free(&(memory->unmapped_segments));
+    free(memory->segments);
+    free(memory->unmapped_segments);
     free(memory);
 }
-
 /* segment_load
  *
  *      Purpose: Gets a word from a segment in main memory.
@@ -105,15 +116,15 @@ extern void segment_free(T memory)
 */
 extern uint32_t segment_load(T memory, int id, int offset)
 {
-    assert(memory != NULL);
-    assert(id >= 0 && id < Seq_length(memory->segments));
+    //assert(memory != NULL);
+    //assert(id >= 0 && id < memory->num_mapped);
 
     /* gets desired segment array based on input */
-    UArray_T segment_array = Seq_get(memory->segments, id);
-    assert(offset >= 0 && offset < UArray_length(segment_array));
+    struct array *segment_array = memory->segments[id];
+    //assert(offset >= 0 && offset < segment_array->length);
 
     /* gets desired value in segment array */
-    uint32_t load_value = *(uint32_t *)UArray_at(segment_array, offset);
+    uint32_t load_value = segment_array->words[offset];
 
     return load_value;
 }
@@ -133,14 +144,16 @@ extern uint32_t segment_load(T memory, int id, int offset)
 extern void segment_store(T memory, int id, int offset, uint32_t word)
 {
     /* checks memory isn't empty and id is in bounds */
-    assert(memory != NULL);
-    assert(id >= 0 && id < Seq_length(memory->segments));
+    //assert(memory != NULL);
+    //fprintf(stderr, "num mapped: %u\n", memory->num_mapped);
+    //fprintf(stderr, "id: %u\n",id);
+    //assert(id >= 0 && id < memory->num_mapped);
 
-    UArray_T segment_array = Seq_get(memory->segments, id);
-    assert(offset >= 0 && offset < UArray_length(segment_array));
+    struct array *segment_array = memory->segments[id];
+    //assert(offset >= 0 && offset < segment_array->length);
 
     /* stores word at proper address in segment array */
-    *(uint32_t *)UArray_at(segment_array, offset) = word;
+    segment_array->words[offset] = word;
 }
 
 /* segment_load_program
@@ -158,20 +171,32 @@ extern void segment_store(T memory, int id, int offset, uint32_t word)
 */
 extern void segment_load_program(T memory, int id)
 {
-    assert(memory != NULL);
-    assert(id >= 0 && id < Seq_length(memory->segments));
+    //assert(memory != NULL);
+    //assert(id >= 0 && id < memory->num_mapped);
 
     /* gets desired segment array and finds length */
-    UArray_T segment_array = Seq_get(memory->segments, id);
-    int segment_array_length = UArray_length(segment_array);
+    struct array *segment_array = memory->segments[id];
 
     /* creates copy of segment array and frees old array */
-    UArray_T program_array = UArray_copy(segment_array, segment_array_length);
-    UArray_T old_program_array = Seq_get(memory->segments, 0);
-    UArray_free(&old_program_array);
+    struct array *program_array = copy(segment_array);
+    struct array *old_program_array = memory->segments[0];
+    free(old_program_array->words);
+    free(old_program_array);
 
     /* puts contents into segment 0 */
-    Seq_put(memory->segments, 0, program_array);
+    memory->segments[0] = program_array;
+}
+
+struct array *copy(struct array *segment)
+{
+    int size = segment->length;
+    struct array *new_arr = malloc(sizeof(struct array));
+    new_arr->words = calloc(size, sizeof(uint32_t));
+    for (int i = 0; i < size; i++) {
+        new_arr->words[i] = segment->words[i];
+    }
+    new_arr->length = size;
+    return new_arr;
 }
 
 /* segment_unmap
@@ -189,18 +214,17 @@ extern void segment_load_program(T memory, int id)
 */
 extern void segment_unmap(T memory, int id)
 {
-    assert(memory != NULL);
-    assert(id >= 0 && id < Seq_length(memory->segments));
+    //assert(memory != NULL);
+    //assert(id >= 0 && id < memory->num_mapped);
 
-    UArray_T segment_array = Seq_put(memory->segments, id, NULL);
-    UArray_free(&segment_array);
-
-    /* allocate space for a new id to be stored */
-    int *newId = malloc(sizeof(int));
-    *newId = id;
+    struct array *segment_array = memory->segments[id];
+    free(segment_array->words);
+    free(segment_array);
+    memory->segments[id] = NULL;
 
     /* adds id to unmapped segments sequence */
-    Seq_addhi(memory->unmapped_segments, (void *)(uintptr_t)newId);
+    memory->unmapped_segments[memory->num_unmapped] = id;
+    memory->num_unmapped++;
 }
 
 /* segment_map
@@ -217,33 +241,34 @@ extern void segment_unmap(T memory, int id)
 */
 extern uint32_t segment_map(T memory, int size)
 {
-    assert(memory != NULL);
-    assert(size > 0);
+    //assert(memory != NULL);
+    //assert(size > 0);
 
-    int index;
+    int index = 0;
+    //fprintf(stderr, "num mapped: %d num unmapped: %d\n", memory->num_mapped, memory->num_unmapped);
 
     /* creates new segment array and checks memory was correctly allocated */
-    UArray_T new_segment_array = UArray_new(size, sizeof(int));
-    assert(new_segment_array != NULL);
+    struct array *new_segment_array = malloc(sizeof(struct array));
+    new_segment_array->length = size;
+    //assert(new_segment_array != NULL);
 
     /* initializes every element in new segment array to be 0 */
-    for (int i = 0; i < UArray_length(new_segment_array); i++) {
-        *(uint32_t *)UArray_at(new_segment_array, i) = 0;
-    }
+    new_segment_array->words = calloc(size, sizeof(uint32_t));
 
     /* gets length of unmapped segments sequence */
-    int unmapped_segments_length = Seq_length(memory->unmapped_segments);
-
-    if (unmapped_segments_length == 0) {
+    if (memory->num_unmapped == 0) {
         /* adds new segment array to sequence of segments */
-        index = Seq_length(memory->segments);
-        Seq_addhi(memory->segments, new_segment_array);
+        index = memory->num_mapped;
+        memory->segments[index] = new_segment_array;
     } else {
         /* get index value and store in memory segments sequence */
-        index = *(int *)Seq_get(memory->unmapped_segments, 0);
-        free(Seq_remlo(memory->unmapped_segments));
-        Seq_put(memory->segments, index, new_segment_array);
+        uint32_t last = memory->num_unmapped - 1;
+        index = memory->unmapped_segments[last];
+        memory->segments[index] = new_segment_array;
+        memory->unmapped_segments[last] = 0;
+        memory->num_unmapped--;
     }
+    memory->num_mapped++;
 
     return (uint32_t)index; /* returns index of newly mapped segment */
 }
